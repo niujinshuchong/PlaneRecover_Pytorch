@@ -43,18 +43,18 @@ class PlanePredNet(nn.Module):
         self.upcnv4b = nn.Conv2d(256, 128, (3, 3), stride=1, padding=1)
 
         self.upcnv3 = ConvTranspose2d(128, 64, (3, 3), stride=2, padding=1)
-        self.upcnv3b = nn.Conv2d(128+self.num_planes, 64, (3, 3), stride=1, padding=1)
+        self.upcnv3b = nn.Conv2d(128+self.num_planes+1, 64, (3, 3), stride=1, padding=1)
 
         self.upcnv2 = ConvTranspose2d(64, 32, (3, 3), stride=2, padding=1)
-        self.upcnv2b = nn.Conv2d(64+self.num_planes, 32, (3, 3), stride=1, padding=1)
+        self.upcnv2b = nn.Conv2d(64+self.num_planes+1, 32, (3, 3), stride=1, padding=1)
 
         self.upcnv1 = ConvTranspose2d(32, 16, (3, 3), stride=2, padding=1)
-        self.upcnv1b = nn.Conv2d(16+self.num_planes, 16, (3, 3), stride=1, padding=1)
+        self.upcnv1b = nn.Conv2d(16+self.num_planes+1, 16, (3, 3), stride=1, padding=1)
 
-        self.conv_segm4 = nn.Conv2d(128, self.num_planes, (3, 3), stride=1, padding=1)
-        self.conv_segm3 = nn.Conv2d(64, self.num_planes, (3, 3), stride=1, padding=1)
-        self.conv_segm2 = nn.Conv2d(32, self.num_planes, (3, 3), stride=1, padding=1)
-        self.conv_segm1 = nn.Conv2d(16, self.num_planes, (3, 3), stride=1, padding=1)
+        self.conv_segm4 = nn.Conv2d(128, self.num_planes+1, (3, 3), stride=1, padding=1)
+        self.conv_segm3 = nn.Conv2d(64, self.num_planes+1, (3, 3), stride=1, padding=1)
+        self.conv_segm2 = nn.Conv2d(32, self.num_planes+1, (3, 3), stride=1, padding=1)
+        self.conv_segm1 = nn.Conv2d(16, self.num_planes+1, (3, 3), stride=1, padding=1)
         
         self.up_sample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)        
 

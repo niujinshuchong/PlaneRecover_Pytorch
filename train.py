@@ -106,7 +106,7 @@ def load_dataset(subset):
 
 def get_loss(plane_params, pred_masks, depth, label, K_inv):
 
-    loss = 0.
+    mask_loss, depth_loss = 0., 0.
     for scale, pred_mask in zip(range(len(pred_masks)),
                                 pred_masks):
         b, c, h, w = pred_mask.size()
@@ -130,16 +130,24 @@ def get_loss(plane_params, pred_masks, depth, label, K_inv):
 
         logits = pred_mask.view(b, -1, h*w)
         prob = torch.nn.functional.softmax(logits, dim=1) # (b, c, h*w)
-        # multiply label to ignore non planar region
-        diff = diff * prob * cur_label.view(b, 1, -1)
+        diff = diff * prob[:, :-1, :]
 
-        #loss += torch.mean(torch.sum(diff, dim=1))    
-        loss += torch.sum(torch.mean(diff, dim=2))
-    return loss
+        depth_loss += torch.mean(torch.mean(diff, dim=2))
+
+        # mask loss
+        plane_prob = prob[:,:-1, :].sum(dim=1, keepdim=True)
+        non_plane_prob = prob[:,-1:, :]
+        cur_label = cur_label.view(b, 1, -1)
+        mask_loss += torch.mean(-cur_label*torch.log(plane_prob) - (1.0 - cur_label)*torch.log(non_plane_prob))
+
+    loss = 0.1 * mask_loss + depth_loss
+    return loss, mask_loss, depth_loss
 
 def train(net, optimizer, data_loader, epoch):
     net.train()
     losses = AverageMeter()
+    losses_mask = AverageMeter()
+    losses_depth = AverageMeter()
 
     for iter, sample in enumerate(data_loader):
         image = sample['image'].cuda()
@@ -151,7 +159,7 @@ def train(net, optimizer, data_loader, epoch):
         plane_params, pred_masks = net(image)
 
         # loss
-        loss = get_loss(plane_params, pred_masks, depth, label, K_inv)     
+        loss, loss_mask, loss_depth = get_loss(plane_params, pred_masks, depth, label, K_inv)     
 
         # Backward
         optimizer.zero_grad()
@@ -159,10 +167,14 @@ def train(net, optimizer, data_loader, epoch):
         optimizer.step()
 
         losses.update(loss.item())
+        losses_mask.update(loss_mask.item())
+        losses_depth.update(loss_depth.item())
 
         if iter % 10 == 0:
             print(f"[{epoch:2d}][{iter:4d}/{len(data_loader)}]"
-                  f"Loss:{losses.val:.4f} ({losses.avg:.4f})")
+                  f"Loss:{losses.val:.4f} ({losses.avg:.4f})"
+                  f"Mask:{losses_mask.val:.4f} ({losses_mask.avg:.4f})"
+                  f"Depth:{losses_depth.val:.4f} ({losses_depth.avg:.4f})")
 
 def eval(net, data_loader):
     net.eval()
@@ -174,8 +186,9 @@ def eval(net, data_loader):
         image = tensor_to_image(image[0].cpu())       
         logits = pred_masks[0][0].cpu().numpy()
         prediction = logits.argmax(axis=0)
+        print(len(np.unique(prediction)))
         cv2.imshow("image", image)
-        cv2.imshow("prediction", prediction.astype(np.uint8)*60)
+        cv2.imshow("prediction", prediction.astype(np.uint8)*50)
         cv2.waitKey(0)
 
 
@@ -188,12 +201,12 @@ def main(mode):
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, net.parameters()),
                                      lr=0.0001, weight_decay=0.00001)
 
-    checkpoint_dir = os.path.join('experiments', '3', 'checkpoints')
+    checkpoint_dir = os.path.join('experiments', '4', 'checkpoints')
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
 
     if mode == 'eval':
-        resume_dir = os.path.join(checkpoint_dir, f"network_epoch_33.pt")
+        resume_dir = os.path.join(checkpoint_dir, f"network_epoch_5.pt")
         model_dict = torch.load(resume_dir)
         net.load_state_dict(model_dict)
         eval(net, data_loader)
