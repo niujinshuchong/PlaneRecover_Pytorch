@@ -1,6 +1,7 @@
 import torch
 from torch.utils import data
 import torchvision.transforms as tf
+import  torch.nn.functional as F
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -34,10 +35,11 @@ class PlaneDataset(data.Dataset):
         image = cv2.imread(prefix + '.jpg')
         depth = cv2.imread(prefix + '_depth.png', -1)
         label = cv2.imread(prefix + '_label.png', -1)
-
+         
         cam = np.array(list(map(float, open(prefix + '_cam.txt').readline().strip().split(',')))).reshape(3, 3)
         K_inv = np.linalg.inv(np.array(cam))
 
+        h, w, _ = image.shape
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         image = Image.fromarray(image)
         if self.transform is not None:
@@ -45,8 +47,8 @@ class PlaneDataset(data.Dataset):
 
         sample = {
             'image' : image, 
-            'depth' : torch.Tensor(depth[:, :, 0] / 100.),
-            'label' : torch.Tensor(label),
+            'depth' : torch.Tensor(depth[:, :, 0] / 100.).view(1, h, w),
+            'label' : torch.Tensor(label).view(1, h, w),
             'K_inv' : torch.Tensor(K_inv)
         }
 
@@ -54,8 +56,8 @@ class PlaneDataset(data.Dataset):
 
 
 def generate_homogeneous(h=192, w=320):
-    x = torch.arange(w).view(1, w)
-    y = torch.arange(h).view(h, 1)
+    x = torch.arange(w, dtype=torch.float).view(1, w)
+    y = torch.arange(h, dtype=torch.float).view(h, 1)
 
     x = x.cuda()
     y = y.cuda()
@@ -85,6 +87,7 @@ def plot(image, parameters, embeddings, depth, label):
     cv2.imshow("pred", prediction.astype(np.uint8)*50)
     cv2.waitKey(0)
 
+
 def load_dataset(subset):
     transforms = tf.Compose([
         tf.ToTensor(),
@@ -95,26 +98,44 @@ def load_dataset(subset):
         dataset = PlaneDataset(txt_file='train_8000.txt', transform=transforms, root_dir='data')
         loaders = data.DataLoader(dataset, batch_size=4, shuffle=True, num_workers=8)
     else:
-        dataset = PlaneDataset(txt_file='tst_100.txt', transform=transforms, root_dir='data')
+        dataset = PlaneDataset(txt_file='train_8000.txt', transform=transforms, root_dir='data')
         loaders = data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=2)
 
     return loaders
 
-def get_loss(plane_params, logits, depth, label, K_inv):
-    b, c, h, w = logits.size()
-    # infer all depth
-    xy1 = generate_homogeneous(h, w)
-    ray = torch.matmul(K_inv[0], xy1)                # (3, h*w)
-    Q = ray.unsqueeze(0) * depth.view(b, 1, h*w)     # (b, 3, h*w)
 
-    diff = torch.abs(torch.matmul(plane_params, Q) - 1.)
+def get_loss(plane_params, pred_masks, depth, label, K_inv):
 
-    logits = logits.view(b, -1, h*w)
-    prob = torch.nn.functional.softmax(logits, dim=1) # (b, c, h*w)
-    # multiply label to ignore non planar region
-    diff = diff * prob * label.view(b, 1, -1)
+    loss = 0.
+    for scale, pred_mask in zip(range(len(pred_masks)),
+                                pred_masks):
+        b, c, h, w = pred_mask.size()
 
-    return torch.mean(torch.sum(diff, dim=1))    
+        # downsample 
+        cur_depth = F.interpolate(depth, (h, w), mode='bilinear', align_corners=False)
+        cur_label = F.interpolate(label, (h, w), mode='nearest')
+        # assume all K_inv is same
+        cur_K_inv = K_inv[0].clone()          
+        cur_K_inv[0, 0] = cur_K_inv[0, 0] / (2**scale)
+        cur_K_inv[1, 1] = cur_K_inv[1, 1] / (2**scale)
+        cur_K_inv[0, 2] = cur_K_inv[0, 2] / (2**scale)
+        cur_K_inv[1, 2] = cur_K_inv[1, 2] / (2**scale)
+
+        # infer all depth
+        xy1 = generate_homogeneous(h, w)
+        ray = torch.matmul(cur_K_inv, xy1)                # (3, h*w)
+        Q = ray.unsqueeze(0) * cur_depth.view(b, 1, h*w)      # (b, 3, h*w)
+
+        diff = torch.abs(torch.matmul(plane_params, Q) - 1.)
+
+        logits = pred_mask.view(b, -1, h*w)
+        prob = torch.nn.functional.softmax(logits, dim=1) # (b, c, h*w)
+        # multiply label to ignore non planar region
+        diff = diff * prob * cur_label.view(b, 1, -1)
+
+        #loss += torch.mean(torch.sum(diff, dim=1))    
+        loss += torch.sum(torch.mean(diff, dim=2))
+    return loss
 
 def train(net, optimizer, data_loader, epoch):
     net.train()
@@ -127,10 +148,10 @@ def train(net, optimizer, data_loader, epoch):
         K_inv = sample['K_inv'].cuda()
 
         # forward
-        plane_params, logits = net(image)
+        plane_params, pred_masks = net(image)
 
         # loss
-        loss = get_loss(plane_params, logits, depth, label, K_inv)     
+        loss = get_loss(plane_params, pred_masks, depth, label, K_inv)     
 
         # Backward
         optimizer.zero_grad()
@@ -148,10 +169,10 @@ def eval(net, data_loader):
     for iter, sample in enumerate(data_loader):
         image = sample['image'].cuda()
         with torch.no_grad():
-            _, logits = net(image)
+            _, pred_masks = net(image)
 
         image = tensor_to_image(image[0].cpu())       
-        logits = logits[0].cpu().numpy()
+        logits = pred_masks[0][0].cpu().numpy()
         prediction = logits.argmax(axis=0)
         cv2.imshow("image", image)
         cv2.imshow("prediction", prediction.astype(np.uint8)*60)
@@ -167,12 +188,12 @@ def main(mode):
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, net.parameters()),
                                      lr=0.0001, weight_decay=0.00001)
 
-    checkpoint_dir = os.path.join('experiments', '1', 'checkpoints')
+    checkpoint_dir = os.path.join('experiments', '3', 'checkpoints')
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
 
     if mode == 'eval':
-        resume_dir = os.path.join(checkpoint_dir, f"network_epoch_268.pt")
+        resume_dir = os.path.join(checkpoint_dir, f"network_epoch_33.pt")
         model_dict = torch.load(resume_dir)
         net.load_state_dict(model_dict)
         eval(net, data_loader)

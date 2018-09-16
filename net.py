@@ -43,15 +43,20 @@ class PlanePredNet(nn.Module):
         self.upcnv4b = nn.Conv2d(256, 128, (3, 3), stride=1, padding=1)
 
         self.upcnv3 = ConvTranspose2d(128, 64, (3, 3), stride=2, padding=1)
-        self.upcnv3b = nn.Conv2d(128, 64, (3, 3), stride=1, padding=1)
+        self.upcnv3b = nn.Conv2d(128+self.num_planes, 64, (3, 3), stride=1, padding=1)
 
         self.upcnv2 = ConvTranspose2d(64, 32, (3, 3), stride=2, padding=1)
-        self.upcnv2b = nn.Conv2d(64, 32, (3, 3), stride=1, padding=1)
+        self.upcnv2b = nn.Conv2d(64+self.num_planes, 32, (3, 3), stride=1, padding=1)
 
         self.upcnv1 = ConvTranspose2d(32, 16, (3, 3), stride=2, padding=1)
-        #self.upcnv1b = nn.Conv2d(512, 256, (3, 3), stride=1, padding=1)
+        self.upcnv1b = nn.Conv2d(16+self.num_planes, 16, (3, 3), stride=1, padding=1)
 
-        self.pred_mask = nn.Conv2d(16, self.num_planes, (3, 3), stride=1, padding=1)
+        self.conv_segm4 = nn.Conv2d(128, self.num_planes, (3, 3), stride=1, padding=1)
+        self.conv_segm3 = nn.Conv2d(64, self.num_planes, (3, 3), stride=1, padding=1)
+        self.conv_segm2 = nn.Conv2d(32, self.num_planes, (3, 3), stride=1, padding=1)
+        self.conv_segm1 = nn.Conv2d(16, self.num_planes, (3, 3), stride=1, padding=1)
+        
+        self.up_sample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=True)        
 
     def forward(self, image):
         cnv1 = self.relu(self.cnv1(image))
@@ -74,29 +79,38 @@ class PlanePredNet(nn.Module):
         cnv7_plane = self.relu(self.cnv7(cnv6_plane))
         param_pred = self.cnv_param_pred(cnv7_plane)
 
-        param_avg = torch.mean(torch.mean(param_pred, dim=3), dim=2)     # (b, 3, h, b)
+        param_avg = torch.mean(torch.mean(param_pred, dim=3), dim=2)     # (b, 3, h, w)
         param_final = 0.01 * param_avg.view(-1, self.num_planes, 3)
 
         # deconv
         upcnv5 = self.relu(self.upcnv5(cnv5b))
         upcnv5 = torch.cat((upcnv5, cnv4b), dim=1)
-        upcnv5b = self.relu(self.upcnv5b(upcnv5))
+        upcnv5b = self.relu(self.upcnv5b(upcnv5))   # (b, 256, 12, 20)
 
         upcnv4 = self.relu(self.upcnv4(upcnv5b))
         upcnv4 = torch.cat((upcnv4, cnv3b), dim=1)
-        upcnv4b = self.relu(self.upcnv4b(upcnv4))
+        upcnv4b = self.relu(self.upcnv4b(upcnv4))   # (b, 128, 24, 40)
+        segm4 = self.conv_segm4(upcnv4b)            
+        segm4_up = self.up_sample(segm4)
 
         upcnv3 = self.relu(self.upcnv3(upcnv4b))
-        upcnv3 = torch.cat((upcnv3, cnv2b), dim=1)
+        upcnv3 = torch.cat((upcnv3, cnv2b, segm4_up), dim=1)
         upcnv3b = self.relu(self.upcnv3b(upcnv3))
-
+        segm3 = self.conv_segm3(upcnv3b)            
+        segm3_up = self.up_sample(segm3)
+        
         upcnv2 = self.relu(self.upcnv2(upcnv3b))
-        upcnv2 = torch.cat((upcnv2, cnv1b), dim=1)
+        upcnv2 = torch.cat((upcnv2, cnv1b, segm3_up), dim=1)
         upcnv2b = self.relu(self.upcnv2b(upcnv2))
+        segm2 = self.conv_segm2(upcnv2b)
+        segm2_up = self.up_sample(segm2)
 
         upcnv1 = self.relu(self.upcnv1(upcnv2b)) 
-        mask = self.pred_mask(upcnv1)
+        upcnv1 = torch.cat((upcnv1, segm2_up), dim=1)
+        upcnv1b = self.relu(self.upcnv1b(upcnv1))        
+        segm1 = self.conv_segm1(upcnv1b)
 
-        return param_final, mask
+        return param_final, [segm1, segm2, segm3, segm4]
+
 
 
