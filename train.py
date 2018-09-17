@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import time
 import cv2
 import os
+import argparse
 from PIL import Image
 from scipy.io import loadmat
 
@@ -37,6 +38,8 @@ class PlaneDataset(data.Dataset):
         label = cv2.imread(prefix + '_label.png', -1)
          
         cam = np.array(list(map(float, open(prefix + '_cam.txt').readline().strip().split(',')))).reshape(3, 3)
+
+        # calculate all K_inv for different scale output
         K_invs = []
         for s in range(4):
             C = cam.copy()
@@ -124,14 +127,10 @@ def get_loss(plane_params, pred_masks, depth, label, K_inv):
         cur_depth = F.interpolate(depth, (h, w), mode='bilinear', align_corners=False)
         #cur_label = F.interpolate(label, (h, w), mode='nearest')
         cur_label = F.interpolate(label, (h, w), mode='bilinear', align_corners=False)
-        # assume all K_inv is same
+        # assume K_inv for different images is same
         cur_K_inv = K_inv[0, scale].clone()          
-        #cur_K_inv[0, 0] = cur_K_inv[0, 0] / (2**scale)
-        #cur_K_inv[1, 1] = cur_K_inv[1, 1] / (2**scale)
-        #cur_K_inv[0, 2] = cur_K_inv[0, 2] / (2**scale)
-        #cur_K_inv[1, 2] = cur_K_inv[1, 2] / (2**scale)
 
-        # infer all depth
+        # infer all Q for all pixel
         xy1 = generate_homogeneous(h, w)
         ray = torch.matmul(cur_K_inv, xy1)                # (3, h*w)
         Q = ray.unsqueeze(0) * cur_depth.view(b, 1, h*w)      # (b, 3, h*w)
@@ -203,31 +202,48 @@ def eval(net, data_loader):
         cv2.waitKey(0)
 
 
-def main(mode):
+def main():
+    args = parse_args()
+
     net = PlanePredNet(5)
     net.cuda()
 
-    data_loader = load_dataset(mode)
+    data_loader = load_dataset(args.mode)
 
-    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, net.parameters()),
-                                     lr=0.0001, weight_decay=0.00001)
-
-    checkpoint_dir = os.path.join('experiments', '6', 'checkpoints')
-    if not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
-
-    if mode == 'eval':
-        resume_dir = os.path.join(checkpoint_dir, f"network_epoch_3.pt")
-        model_dict = torch.load(resume_dir)
+    if args.mode == 'eval':
+        model_dict = torch.load(args.resume_dir)
         net.load_state_dict(model_dict)
         eval(net, data_loader)
         exit(0)
+
+    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, net.parameters()),
+                                        lr=0.0001, weight_decay=0.00001)
+
+    checkpoint_dir = os.path.join('experiments', args.train_id, 'checkpoints')
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
 
     for epoch in range(300):
         train(net, optimizer, data_loader, epoch)
         torch.save(net.state_dict(), os.path.join(checkpoint_dir, f"network_epoch_{epoch}.pt"))
 
 
-#main('train')
-main('eval')
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', type=str,
+                    help='mode',
+                    required=True)
+    parser.add_argument('--resume_dir', type=str,
+                    help='where to resume model for evaluation',
+                    required=False)
+    parser.add_argument('--train_id', type=str,
+                    help='train id for training',
+                    required=False)
+
+    args = parser.parse_args()
+
+    return args
+
+if __name__ == "__main__":
+    main()
 
