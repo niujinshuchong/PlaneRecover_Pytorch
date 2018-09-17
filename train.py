@@ -37,7 +37,16 @@ class PlaneDataset(data.Dataset):
         label = cv2.imread(prefix + '_label.png', -1)
          
         cam = np.array(list(map(float, open(prefix + '_cam.txt').readline().strip().split(',')))).reshape(3, 3)
-        K_inv = np.linalg.inv(np.array(cam))
+        K_invs = []
+        for s in range(4):
+            C = cam.copy()
+            C[0, 0] = C[0, 0] / (2**s)
+            C[1, 1] = C[1, 1] / (2**s)
+            C[0, 2] = C[0, 2] / (2**s)
+            C[1, 2] = C[1, 2] / (2**s)
+            K_inv = np.linalg.inv(C)
+            K_invs.append(K_inv)
+        K_invs = np.stack(K_invs)
 
         h, w, _ = image.shape
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -49,7 +58,7 @@ class PlaneDataset(data.Dataset):
             'image' : image, 
             'depth' : torch.Tensor(depth[:, :, 0] / 100.).view(1, h, w),
             'label' : torch.Tensor(label).view(1, h, w),
-            'K_inv' : torch.Tensor(K_inv)
+            'K_inv' : torch.Tensor(K_invs)
         }
 
         return sample
@@ -113,13 +122,14 @@ def get_loss(plane_params, pred_masks, depth, label, K_inv):
 
         # downsample 
         cur_depth = F.interpolate(depth, (h, w), mode='bilinear', align_corners=False)
-        cur_label = F.interpolate(label, (h, w), mode='nearest')
+        #cur_label = F.interpolate(label, (h, w), mode='nearest')
+        cur_label = F.interpolate(label, (h, w), mode='bilinear', align_corners=False)
         # assume all K_inv is same
-        cur_K_inv = K_inv[0].clone()          
-        cur_K_inv[0, 0] = cur_K_inv[0, 0] / (2**scale)
-        cur_K_inv[1, 1] = cur_K_inv[1, 1] / (2**scale)
-        cur_K_inv[0, 2] = cur_K_inv[0, 2] / (2**scale)
-        cur_K_inv[1, 2] = cur_K_inv[1, 2] / (2**scale)
+        cur_K_inv = K_inv[0, scale].clone()          
+        #cur_K_inv[0, 0] = cur_K_inv[0, 0] / (2**scale)
+        #cur_K_inv[1, 1] = cur_K_inv[1, 1] / (2**scale)
+        #cur_K_inv[0, 2] = cur_K_inv[0, 2] / (2**scale)
+        #cur_K_inv[1, 2] = cur_K_inv[1, 2] / (2**scale)
 
         # infer all depth
         xy1 = generate_homogeneous(h, w)
@@ -132,7 +142,7 @@ def get_loss(plane_params, pred_masks, depth, label, K_inv):
         prob = torch.nn.functional.softmax(logits, dim=1) # (b, c, h*w)
         diff = diff * prob[:, :-1, :]
 
-        depth_loss += torch.mean(torch.mean(diff, dim=2))
+        depth_loss += torch.sum(torch.mean(torch.mean(diff, dim=2), dim=0))
 
         # mask loss
         plane_prob = prob[:,:-1, :].sum(dim=1, keepdim=True)
@@ -140,7 +150,7 @@ def get_loss(plane_params, pred_masks, depth, label, K_inv):
         cur_label = cur_label.view(b, 1, -1)
         mask_loss += torch.mean(-cur_label*torch.log(plane_prob) - (1.0 - cur_label)*torch.log(non_plane_prob))
 
-    loss = 0.1 * mask_loss + depth_loss
+    loss = mask_loss + depth_loss
     return loss, mask_loss, depth_loss
 
 def train(net, optimizer, data_loader, epoch):
@@ -189,6 +199,7 @@ def eval(net, data_loader):
         print(len(np.unique(prediction)))
         cv2.imshow("image", image)
         cv2.imshow("prediction", prediction.astype(np.uint8)*50)
+        #cv2.imwrite("prediction"+str(iter)+'.png', prediction.astype(np.uint8)*50)
         cv2.waitKey(0)
 
 
@@ -201,12 +212,12 @@ def main(mode):
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, net.parameters()),
                                      lr=0.0001, weight_decay=0.00001)
 
-    checkpoint_dir = os.path.join('experiments', '4', 'checkpoints')
+    checkpoint_dir = os.path.join('experiments', '6', 'checkpoints')
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
 
     if mode == 'eval':
-        resume_dir = os.path.join(checkpoint_dir, f"network_epoch_5.pt")
+        resume_dir = os.path.join(checkpoint_dir, f"network_epoch_3.pt")
         model_dict = torch.load(resume_dir)
         net.load_state_dict(model_dict)
         eval(net, data_loader)
