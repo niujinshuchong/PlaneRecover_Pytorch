@@ -110,7 +110,7 @@ def load_dataset(subset):
         dataset = PlaneDataset(txt_file='train_8000.txt', transform=transforms, root_dir='data')
         loaders = data.DataLoader(dataset, batch_size=4, shuffle=True, num_workers=8)
     else:
-        dataset = PlaneDataset(txt_file='train_8000.txt', transform=transforms, root_dir='data')
+        dataset = PlaneDataset(txt_file='tst_100.txt', transform=transforms, root_dir='data')
         loaders = data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=2)
 
     return loaders
@@ -147,9 +147,9 @@ def get_loss(plane_params, pred_masks, depth, label, K_inv):
         plane_prob = prob[:,:-1, :].sum(dim=1, keepdim=True)
         non_plane_prob = prob[:,-1:, :]
         cur_label = cur_label.view(b, 1, -1)
-        mask_loss += torch.mean(-cur_label*torch.log(plane_prob) - (1.0 - cur_label)*torch.log(non_plane_prob))
+        mask_loss += torch.mean(-cur_label*torch.log(plane_prob+1e-8) - (1.0 - cur_label)*torch.log(non_plane_prob+1e-8))
 
-    loss = mask_loss + depth_loss
+    loss = 0.1*mask_loss + depth_loss
     return loss, mask_loss, depth_loss
 
 def train(net, optimizer, data_loader, epoch):
@@ -190,14 +190,24 @@ def eval(net, data_loader):
     for iter, sample in enumerate(data_loader):
         image = sample['image'].cuda()
         with torch.no_grad():
-            _, pred_masks = net(image)
+            params, pred_masks = net(image)
 
         image = tensor_to_image(image[0].cpu())       
         logits = pred_masks[0][0].cpu().numpy()
         prediction = logits.argmax(axis=0)
         print(len(np.unique(prediction)))
+        params = params[0]
+        norm = params.norm(dim=1, keepdim=True)
+        params = params / norm
+        print(torch.cat((params, 1./norm), dim=1))
+        for i in range(6):
+            print(np.sum(prediction == i))
+        predictions = []
+        for i in range(6):
+            predictions.append(prediction == i)
+        prediction = np.concatenate(predictions, axis=0)
         cv2.imshow("image", image)
-        cv2.imshow("prediction", prediction.astype(np.uint8)*50)
+        cv2.imshow("prediction", prediction.astype(np.uint8)*250)
         #cv2.imwrite("prediction"+str(iter)+'.png', prediction.astype(np.uint8)*50)
         cv2.waitKey(0)
 
@@ -210,9 +220,11 @@ def main():
 
     data_loader = load_dataset(args.mode)
 
-    if args.mode == 'eval':
+    if args.resume_dir is not None:
         model_dict = torch.load(args.resume_dir)
         net.load_state_dict(model_dict)
+
+    if args.mode == 'eval':
         eval(net, data_loader)
         exit(0)
 
@@ -225,7 +237,8 @@ def main():
 
     for epoch in range(300):
         train(net, optimizer, data_loader, epoch)
-        torch.save(net.state_dict(), os.path.join(checkpoint_dir, f"network_epoch_{epoch}.pt"))
+        if epoch % 10 == 0:
+            torch.save(net.state_dict(), os.path.join(checkpoint_dir, f"network_epoch_{epoch}.pt"))
 
 
 def parse_args():
