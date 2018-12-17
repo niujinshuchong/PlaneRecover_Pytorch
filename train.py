@@ -110,7 +110,7 @@ def load_dataset(subset):
         dataset = PlaneDataset(txt_file='train_8000.txt', transform=transforms, root_dir='data')
         loaders = data.DataLoader(dataset, batch_size=4, shuffle=True, num_workers=8)
     else:
-        dataset = PlaneDataset(txt_file='train_8000.txt', transform=transforms, root_dir='data')
+        dataset = PlaneDataset(txt_file='tst_100.txt', transform=transforms, root_dir='data')
         loaders = data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=2)
 
     return loaders
@@ -147,9 +147,9 @@ def get_loss(plane_params, pred_masks, depth, label, K_inv):
         plane_prob = prob[:,:-1, :].sum(dim=1, keepdim=True)
         non_plane_prob = prob[:,-1:, :]
         cur_label = cur_label.view(b, 1, -1)
-        mask_loss += torch.mean(-cur_label*torch.log(plane_prob) - (1.0 - cur_label)*torch.log(non_plane_prob))
+        mask_loss += torch.mean(-cur_label*torch.log(plane_prob+1e-8) - (1.0 - cur_label)*torch.log(non_plane_prob+1e-8))
 
-    loss = mask_loss + depth_loss
+    loss = 0.25*mask_loss + depth_loss
     return loss, mask_loss, depth_loss
 
 def train(net, optimizer, data_loader, epoch):
@@ -193,7 +193,7 @@ def eval(net, data_loader):
             _, pred_masks = net(image)
 
         image = tensor_to_image(image[0].cpu())       
-        logits = pred_masks[0][0].cpu().numpy()
+        logits = pred_masks[1][0].cpu().numpy()
         prediction = logits.argmax(axis=0)
         print(len(np.unique(prediction)))
         cv2.imshow("image", image)
@@ -210,9 +210,11 @@ def main():
 
     data_loader = load_dataset(args.mode)
 
-    if args.mode == 'eval':
+    if args.resume_dir is not None:
         model_dict = torch.load(args.resume_dir)
         net.load_state_dict(model_dict)
+
+    if args.mode == 'eval':
         eval(net, data_loader)
         exit(0)
 
