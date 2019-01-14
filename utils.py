@@ -24,15 +24,26 @@ class AverageMeter(object):
         self.count += n
         self.avg = self.sum / self.count
 
+
 Tensor_to_Image = transforms.Compose([
     transforms.Normalize([0.0, 0.0, 0.0], [1.0/0.229, 1.0/0.224, 1.0/0.225]),
     transforms.Normalize([-0.485, -0.456, -0.406], [1.0, 1.0, 1.0]),
     transforms.ToPILImage()
 ])
 
+
 def tensor_to_image(image):
     image = Tensor_to_Image(image)
     image = np.asarray(image)
     image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
     return image
+
+
+# de-preprocess and convert to tensorboard image
+def tensor_to_X_image(image):
+    image = Tensor_to_Image(image)
+    image = np.asarray(image)
+    image = np.transpose(image, (2, 0, 1))
+    return image
+
 

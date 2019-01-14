@@ -13,7 +13,10 @@ from PIL import Image
 from scipy.io import loadmat
 
 from net import PlanePredNet
-from utils import AverageMeter, tensor_to_image
+from utils import AverageMeter, tensor_to_image, tensor_to_X_image
+
+from path import Path
+from tensorboardX import SummaryWriter
 
 torch.manual_seed(123)
 np.random.seed(123)
@@ -152,7 +155,8 @@ def get_loss(plane_params, pred_masks, depth, label, K_inv):
     loss = 0.1*mask_loss + depth_loss
     return loss, mask_loss, depth_loss
 
-def train(net, optimizer, data_loader, epoch):
+
+def train(net, optimizer, data_loader, epoch, writer):
     net.train()
     losses = AverageMeter()
     losses_mask = AverageMeter()
@@ -168,7 +172,7 @@ def train(net, optimizer, data_loader, epoch):
         plane_params, pred_masks = net(image)
 
         # loss
-        loss, loss_mask, loss_depth = get_loss(plane_params, pred_masks, depth, label, K_inv)     
+        loss, loss_mask, loss_depth = get_loss(plane_params, pred_masks, depth, label, K_inv)
 
         # Backward
         optimizer.zero_grad()
@@ -184,8 +188,26 @@ def train(net, optimizer, data_loader, epoch):
                   f"Loss:{losses.val:.4f} ({losses.avg:.4f})"
                   f"Mask:{losses_mask.val:.4f} ({losses_mask.avg:.4f})"
                   f"Depth:{losses_depth.val:.4f} ({losses_depth.avg:.4f})")
+            writer.add_scalar('loss/total_loss', losses.val, iter + epoch * len(data_loader))
+            writer.add_scalar('loss/mask_loss', losses_mask.val, iter + epoch * len(data_loader))
+            writer.add_scalar('loss/depth_loss', losses_depth.val, iter + epoch * len(data_loader))
 
-def eval(net, data_loader):
+        if iter % 100 == 0:
+            mask = F.softmax(pred_masks[0], dim=1)
+            for j in range(image.size(0)):
+                writer.add_image('Train Input Image/%d'%(j), tensor_to_X_image(image[j].cpu()), iter + epoch * len(data_loader))
+                writer.add_image('Train GT Depth/%d'%(j), 1. / depth[j], iter + epoch * len(data_loader))
+                writer.add_image('Train GT Mask/%d'%(j), label[j], iter + epoch * len(data_loader))
+
+                # predict mask
+                for k in range(mask.size(1) - 1):
+                    writer.add_image('Train Mask %d/%d'%(k, j), mask[j, k:k+1], iter + epoch * len(data_loader))
+
+                # non plane mask
+                writer.add_image('Train Non-plane Mask/%d'%(j), mask[j, -1:], iter + epoch * len(data_loader))
+
+
+def eval(net, data_loader, epoch, writer):
     net.eval()
     for iter, sample in enumerate(data_loader):
         image = sample['image'].cuda()
@@ -215,47 +237,53 @@ def eval(net, data_loader):
 def main():
     args = parse_args()
 
-    net = PlanePredNet(5)
+    net = PlanePredNet(args.plane_num)
     net.cuda()
 
-    data_loader = load_dataset(args.mode)
+    train_loader = load_dataset('train')
+    val_loader = load_dataset('val')
 
     if args.resume_dir is not None:
         model_dict = torch.load(args.resume_dir)
         net.load_state_dict(model_dict)
 
-    if args.mode == 'eval':
-        eval(net, data_loader)
-        exit(0)
-
     optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, net.parameters()),
                                         lr=0.0001, weight_decay=0.00001)
 
-    checkpoint_dir = os.path.join('experiments', args.train_id, 'checkpoints')
-    if not os.path.exists(checkpoint_dir):
-        os.makedirs(checkpoint_dir)
+    save_path = Path(os.path.join('experiments', args.train_id))
+    checkpoint_dir = save_path/'checkpoints'
+    checkpoint_dir.makedirs_p()
 
-    for epoch in range(300):
-        train(net, optimizer, data_loader, epoch)
+    # tensorboard writer
+    writer = SummaryWriter(save_path)
+
+    for epoch in range(args.epochs):
+        train(net, optimizer, train_loader, epoch, writer)
+        #eval(net, val_loader, epoch, writer)
         if epoch % 10 == 0:
             torch.save(net.state_dict(), os.path.join(checkpoint_dir, f"network_epoch_{epoch}.pt"))
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', type=str,
-                    help='mode',
-                    required=True)
+
+    parser.add_argument('--plane_num', default=5, type=int,
+                        help='total training epochs',
+                        required=False)
     parser.add_argument('--resume_dir', type=str,
                     help='where to resume model for evaluation',
                     required=False)
     parser.add_argument('--train_id', type=str,
                     help='train id for training',
                     required=False)
+    parser.add_argument('--epochs', default=300, type=int,
+                        help='total training epochs',
+                        required=False)
 
     args = parser.parse_args()
 
     return args
+
 
 if __name__ == "__main__":
     main()

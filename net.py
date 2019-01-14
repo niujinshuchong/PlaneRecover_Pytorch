@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 
+
 class ConvTranspose2d(nn.Module):
     def __init__(self, in_channel, out, kernel_size, stride, padding):
         super(ConvTranspose2d, self).__init__()
@@ -9,6 +10,7 @@ class ConvTranspose2d(nn.Module):
     
     def forward(self, x):
         return self.conv(self.upsample(x))
+
 
 class PlanePredNet(nn.Module):
     def __init__(self, num_planes):
