@@ -24,12 +24,12 @@ np.random.seed(123)
 
 
 class PlaneDataset(data.Dataset):
-    def __init__(self, txt_file='train_8000.txt', transform=None, root_dir=None, resize=False):
+    def __init__(self, txt_file='train_8000.txt', transform=None, root_dir=None, resize=False, mode='train'):
         self.transform = transform
         self.root_dir = root_dir
         self.txt_file = os.path.join(self.root_dir, txt_file)
         self.resize = resize
-
+        self.mode = mode
         self.data_list = [line.strip().replace(' ', '/') for line in open(self.txt_file, 'r').readlines()]
 
     def __len__(self):
@@ -44,7 +44,7 @@ class PlaneDataset(data.Dataset):
         cam = np.array(list(map(float, open(prefix + '_cam.txt').readline().strip().split(',')))).reshape(3, 3)
 
         # add random flip
-        if random.random() > 0.5:
+        if random.random() > 0.5 and self.mode == 'train':
             image = np.fliplr(image).copy()
             depth = np.fliplr(depth).copy()
             label = np.fliplr(label).copy()
@@ -120,7 +120,7 @@ def load_dataset(subset):
         dataset = PlaneDataset(txt_file='train_8000.txt', transform=transforms, root_dir='data')
         loaders = data.DataLoader(dataset, batch_size=4, shuffle=True, num_workers=8)
     else:
-        dataset = PlaneDataset(txt_file='tst_100.txt', transform=transforms, root_dir='data')
+        dataset = PlaneDataset(txt_file='tst_100.txt', transform=transforms, root_dir='data', mode='val')
         loaders = data.DataLoader(dataset, batch_size=1, shuffle=False, num_workers=2)
 
     return loaders
@@ -220,30 +220,34 @@ def train(net, optimizer, data_loader, epoch, writer):
 
 
 def eval(net, data_loader, epoch, writer):
+    print('Evaluatin at epoch %d'%(epoch))
     net.eval()
     for iter, sample in enumerate(data_loader):
         image = sample['image'].cuda()
+        depth = sample['depth'].cuda()
+        label = sample['label'].cuda()
+
         with torch.no_grad():
             params, pred_masks = net(image)
 
-        image = tensor_to_image(image[0].cpu())       
-        logits = pred_masks[1][0].cpu().numpy()
-        prediction = logits.argmax(axis=0)
-        print(len(np.unique(prediction)))
-        params = params[0]
-        norm = params.norm(dim=1, keepdim=True)
-        params = params / norm
-        print(torch.cat((params, 1./norm), dim=1))
-        for i in range(6):
-            print(np.sum(prediction == i))
-        predictions = []
-        for i in range(6):
-            predictions.append(prediction == i)
-        prediction = np.concatenate(predictions, axis=0)
-        cv2.imshow("image", image)
-        cv2.imshow("prediction", prediction.astype(np.uint8)*250)
-        #cv2.imwrite("prediction"+str(iter)+'.png', prediction.astype(np.uint8)*50)
-        cv2.waitKey(0)
+        mask = F.softmax(pred_masks[0], dim=1)
+        for j in range(image.size(0)):
+            writer.add_image('Val Input Image/%d' % (j+iter*image.size(0)), tensor_to_X_image(image[j].cpu()),
+                             iter + epoch * len(data_loader))
+            writer.add_image('Val GT Depth/%d' % (j+iter*image.size(0)), 1. / depth[j], iter + epoch * len(data_loader))
+            writer.add_image('Val GT Mask/%d' % (j+iter*image.size(0)), label[j], iter + epoch * len(data_loader))
+
+            # apply mask to input image
+            cur_mask = mask[j].detach().cpu().numpy().argmax(axis=0)
+            masked_image = apply_mask(image[j].cpu(), cur_mask, ignore_index=mask.size(1) - 1)
+            writer.add_image('Val Masked Image/%d' % (j+iter*image.size(0)), masked_image, iter + epoch * len(data_loader))
+
+            # predict mask
+            for k in range(mask.size(1) - 1):
+                writer.add_image('Val Mask %d/%d' % (k, j+iter*image.size(0)), mask[j, k:k + 1], iter + epoch * len(data_loader))
+
+            # non plane mask
+            writer.add_image('Val Non-plane Mask/%d' % (j+iter*image.size(0)), mask[j, -1:], iter + epoch * len(data_loader))
 
 
 def main():
@@ -269,10 +273,13 @@ def main():
     # tensorboard writer
     writer = SummaryWriter(save_path)
 
+    eval(net, val_loader, -1, writer)
+
     for epoch in range(args.epochs):
         train(net, optimizer, train_loader, epoch, writer)
-        #eval(net, val_loader, epoch, writer)
+
         if epoch % 10 == 0:
+            eval(net, val_loader, epoch, writer)
             torch.save(net.state_dict(), os.path.join(checkpoint_dir, f"network_epoch_{epoch}.pt"))
 
 
