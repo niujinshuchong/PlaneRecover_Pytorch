@@ -125,8 +125,8 @@ def depth_2_normal(depth, cur_K_inv):
     normal = torch.cross(dx, dy, dim=1)
     assert (normal.size() == dx.size())
 
-    normal /= torch.norm(normal, p=2, dim=1, keepdim=True)
-    normal = (normal + 1) / 2.
+    normal /= (torch.norm(normal, p=2, dim=1, keepdim=True) + 1e-6)
+    #normal = (normal + 1) / 2.
     return normal
 
 
@@ -165,15 +165,16 @@ def load_dataset(subset):
     return loaders
 
 
-def get_loss(plane_params, pred_masks, depth, label, K_inv):
-
-    mask_loss, depth_loss = 0., 0.
+def get_loss(plane_params, pred_masks, depth, normal, label, K_inv):
+    mask_loss, depth_loss, normal_loss = 0., 0., 0.
     for scale, pred_mask in zip(range(len(pred_masks)),
                                 pred_masks):
         b, c, h, w = pred_mask.size()
 
         # downsample 
         cur_depth = F.interpolate(depth, (h, w), mode='bilinear', align_corners=False)
+        cur_normal = F.interpolate(normal, (h, w), mode='bilinear', align_corners=False)
+
         #cur_label = F.interpolate(label, (h, w), mode='nearest')
         cur_label = F.interpolate(label, (h, w), mode='bilinear', align_corners=False)
         # assume K_inv for different images is same
@@ -198,8 +199,17 @@ def get_loss(plane_params, pred_masks, depth, label, K_inv):
         cur_label = cur_label.view(b, 1, -1)
         mask_loss += torch.mean(-cur_label*torch.log(plane_prob+1e-8) - (1.0 - cur_label)*torch.log(non_plane_prob+1e-8))
 
-    loss = 0.1*mask_loss + depth_loss
-    return loss, mask_loss, depth_loss
+        # normal loss,  param is of size (b, num, 3)
+        weight = prob[:, :-1, :] / (plane_prob + 1e-6)
+        plane_normal = plane_params / (torch.norm(plane_params, dim=2, keepdim=True) + 1e-6 ) # (b, num, 3)
+        plane_normal = plane_normal.permute(0, 2, 1)  # (b, 3, num)
+        weighted_pixel_normal = torch.matmul(plane_normal, weight)   # (b, 3, h*w)
+        sim = F.cosine_similarity(weighted_pixel_normal, cur_normal.view(b, 3, -1), dim=1)
+        normal_loss += torch.mean((1. - sim) * cur_label.view(b, -1))
+
+    loss = 0.5*mask_loss + depth_loss + 0.5*normal_loss
+
+    return loss, mask_loss, depth_loss, normal_loss
 
 
 def train(net, optimizer, data_loader, epoch, writer):
@@ -207,6 +217,7 @@ def train(net, optimizer, data_loader, epoch, writer):
     losses = AverageMeter()
     losses_mask = AverageMeter()
     losses_depth = AverageMeter()
+    losses_normal = AverageMeter()
 
     for iter, sample in enumerate(data_loader):
         image = sample['image'].cuda()
@@ -214,11 +225,14 @@ def train(net, optimizer, data_loader, epoch, writer):
         label = sample['label'].cuda()
         K_inv = sample['K_inv'].cuda()
 
+        # normal
+        normal = depth_2_normal(depth, K_inv[0, 0])
+
         # forward
         plane_params, pred_masks = net(image)
 
         # loss
-        loss, loss_mask, loss_depth = get_loss(plane_params, pred_masks, depth, label, K_inv)
+        loss, loss_mask, loss_depth, loss_normal = get_loss(plane_params, pred_masks, depth, normal, label, K_inv)
 
         # Backward
         optimizer.zero_grad()
@@ -228,21 +242,22 @@ def train(net, optimizer, data_loader, epoch, writer):
         losses.update(loss.item())
         losses_mask.update(loss_mask.item())
         losses_depth.update(loss_depth.item())
+        losses_normal.update(loss_normal.item())
 
         if iter % 10 == 0:
             print(f"[{epoch:2d}][{iter:4d}/{len(data_loader)}]"
                   f"Loss:{losses.val:.4f} ({losses.avg:.4f})"
                   f"Mask:{losses_mask.val:.4f} ({losses_mask.avg:.4f})"
-                  f"Depth:{losses_depth.val:.4f} ({losses_depth.avg:.4f})")
+                  f"Depth:{losses_depth.val:.4f} ({losses_depth.avg:.4f})"
+                  f"Normal:{losses_normal.val:.4f} ({losses_normal.avg:.4f})")
             writer.add_scalar('loss/total_loss', losses.val, iter + epoch * len(data_loader))
             writer.add_scalar('loss/mask_loss', losses_mask.val, iter + epoch * len(data_loader))
             writer.add_scalar('loss/depth_loss', losses_depth.val, iter + epoch * len(data_loader))
+            writer.add_scalar('loss/normal_loss', losses_normal.val, iter + epoch * len(data_loader))
 
         if iter % 100 == 0:
-            # normal
-            normal = depth_2_normal(depth, K_inv[0, 0])
-
             mask = F.softmax(pred_masks[0], dim=1)
+            normal = (normal + 1) / 2.
             for j in range(image.size(0)):
                 writer.add_image('Train Input Image/%d'%(j), tensor_to_X_image(image[j].cpu()), iter + epoch * len(data_loader))
                 writer.add_image('Train GT Depth/%d'%(j), 1. / depth[j], iter + epoch * len(data_loader))
