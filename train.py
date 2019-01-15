@@ -91,6 +91,45 @@ def generate_homogeneous(h=192, w=320):
     return xy1
 
 
+def gaussian_smooth(x):
+    # Create gaussian kernels
+    kernel = torch.FloatTensor([[0.006, 0.061, 0.242, 0.383, 0.242, 0.061, 0.006]])
+    kernel = kernel.t() * kernel
+    kernel = kernel.view(1, 1, 7, 7).cuda()
+
+    # Apply smoothing
+    x_smooth = F.conv2d(x, kernel, padding=3)
+
+    return x_smooth
+
+
+def depth_2_normal(depth, cur_K_inv):
+    b, c, h, w = depth.size()
+    assert (c == 1)
+
+    #depth = gaussian_smooth(depth)
+
+    # infer all Q for all pixel
+    xy1 = generate_homogeneous(h, w)
+    ray = torch.matmul(cur_K_inv, xy1)              # (3, h*w)
+    Q = ray.unsqueeze(0) * depth.view(b, 1, h * w)  # (b, 3, h*w)
+    point3D = Q.view(b, 3, h, w)
+
+    dx = point3D[:, :, :, 1:] - point3D[:, :, :, :-1]
+    dy = point3D[:, :, :-1, :] - point3D[:, :, 1:, :]
+
+    dx = dx[:, :, 1:, :]
+    dy = dy[:, :, :, :-1]
+    assert (dx.size() == dy.size())
+
+    normal = torch.cross(dx, dy, dim=1)
+    assert (normal.size() == dx.size())
+
+    normal /= torch.norm(normal, p=2, dim=1, keepdim=True)
+    normal = (normal + 1) / 2.
+    return normal
+
+
 def get_plane_parameters(plane_parameters):
     # infer plane depth
     plane_depth = torch.norm(plane_parameters, 2, dim=1, keepdim=True)  # (n, 1)
@@ -138,7 +177,7 @@ def get_loss(plane_params, pred_masks, depth, label, K_inv):
         #cur_label = F.interpolate(label, (h, w), mode='nearest')
         cur_label = F.interpolate(label, (h, w), mode='bilinear', align_corners=False)
         # assume K_inv for different images is same
-        cur_K_inv = K_inv[0, scale].clone()          
+        cur_K_inv = K_inv[0, scale].clone()
 
         # infer all Q for all pixel
         xy1 = generate_homogeneous(h, w)
@@ -200,6 +239,9 @@ def train(net, optimizer, data_loader, epoch, writer):
             writer.add_scalar('loss/depth_loss', losses_depth.val, iter + epoch * len(data_loader))
 
         if iter % 100 == 0:
+            # normal
+            normal = depth_2_normal(depth, K_inv[0, 0])
+
             mask = F.softmax(pred_masks[0], dim=1)
             for j in range(image.size(0)):
                 writer.add_image('Train Input Image/%d'%(j), tensor_to_X_image(image[j].cpu()), iter + epoch * len(data_loader))
@@ -217,6 +259,8 @@ def train(net, optimizer, data_loader, epoch, writer):
 
                 # non plane mask
                 writer.add_image('Train Non-plane Mask/%d'%(j), mask[j, -1:], iter + epoch * len(data_loader))
+
+                writer.add_image('Train Normal/%d'%(j), normal[j], iter + epoch * len(data_loader))
 
 
 def eval(net, data_loader, epoch, writer):
@@ -273,7 +317,7 @@ def main():
     # tensorboard writer
     writer = SummaryWriter(save_path)
 
-    eval(net, val_loader, -1, writer)
+    #eval(net, val_loader, -1, writer)
 
     for epoch in range(args.epochs):
         train(net, optimizer, train_loader, epoch, writer)
