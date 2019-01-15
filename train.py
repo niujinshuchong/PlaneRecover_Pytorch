@@ -11,9 +11,10 @@ import os
 import argparse
 from PIL import Image
 from scipy.io import loadmat
+import random
 
 from net import PlanePredNet
-from utils import AverageMeter, tensor_to_image, tensor_to_X_image
+from utils import AverageMeter, tensor_to_image, tensor_to_X_image, apply_mask
 
 from path import Path
 from tensorboardX import SummaryWriter
@@ -39,8 +40,14 @@ class PlaneDataset(data.Dataset):
         image = cv2.imread(prefix + '.jpg')
         depth = cv2.imread(prefix + '_depth.png', -1)
         label = cv2.imread(prefix + '_label.png', -1)
-         
+
         cam = np.array(list(map(float, open(prefix + '_cam.txt').readline().strip().split(',')))).reshape(3, 3)
+
+        # add random flip
+        if random.random() > 0.5:
+            image = np.fliplr(image).copy()
+            depth = np.fliplr(depth).copy()
+            label = np.fliplr(label).copy()
 
         # calculate all K_inv for different scale output
         K_invs = []
@@ -198,6 +205,11 @@ def train(net, optimizer, data_loader, epoch, writer):
                 writer.add_image('Train Input Image/%d'%(j), tensor_to_X_image(image[j].cpu()), iter + epoch * len(data_loader))
                 writer.add_image('Train GT Depth/%d'%(j), 1. / depth[j], iter + epoch * len(data_loader))
                 writer.add_image('Train GT Mask/%d'%(j), label[j], iter + epoch * len(data_loader))
+
+                # apply mask to input image
+                cur_mask = mask[j].detach().cpu().numpy().argmax(axis=0)
+                masked_image = apply_mask(image[j].cpu(), cur_mask, ignore_index=mask.size(1) - 1)
+                writer.add_image('Train Masked Image/%d' % (j), masked_image, iter + epoch * len(data_loader))
 
                 # predict mask
                 for k in range(mask.size(1) - 1):
