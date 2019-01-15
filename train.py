@@ -200,14 +200,21 @@ def get_loss(plane_params, pred_masks, depth, normal, label, K_inv):
         mask_loss += torch.mean(-cur_label*torch.log(plane_prob+1e-8) - (1.0 - cur_label)*torch.log(non_plane_prob+1e-8))
 
         # normal loss,  param is of size (b, num, 3)
+        '''
         weight = prob[:, :-1, :] / (plane_prob + 1e-6)
         plane_normal = plane_params / (torch.norm(plane_params, dim=2, keepdim=True) + 1e-6 ) # (b, num, 3)
         plane_normal = plane_normal.permute(0, 2, 1)  # (b, 3, num)
         weighted_pixel_normal = torch.matmul(plane_normal, weight)   # (b, 3, h*w)
         sim = F.cosine_similarity(weighted_pixel_normal, cur_normal.view(b, 3, -1), dim=1)
         normal_loss += torch.mean((1. - sim) * cur_label.view(b, -1))
+        '''
 
-    loss = 0.5*mask_loss + depth_loss + 0.5*normal_loss
+        plane_normal = plane_params / (torch.norm(plane_params, dim=2, keepdim=True) + 1e-6 ) # (b, num, 3)
+        normal_diff = 1. - torch.matmul(plane_normal, cur_normal.view(b, 3, -1)) # (b, num, h*w)
+        normal_diff = normal_diff * prob[:, :-1, :]
+        normal_loss += torch.sum(torch.mean(torch.mean(normal_diff, dim=2), dim=0))
+
+    loss = 0.2*mask_loss + depth_loss + normal_loss
 
     return loss, mask_loss, depth_loss, normal_loss
 
