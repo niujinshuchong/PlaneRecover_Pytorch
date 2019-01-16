@@ -127,7 +127,7 @@ def depth_2_normal(depth, cur_K_inv):
 
     normal /= (torch.norm(normal, p=2, dim=1, keepdim=True) + 1e-6)
     #normal = (normal + 1) / 2.
-    return normal
+    return -normal
 
 
 def get_plane_parameters(plane_parameters):
@@ -174,6 +174,7 @@ def get_loss(plane_params, pred_masks, depth, normal, label, K_inv):
         # downsample 
         cur_depth = F.interpolate(depth, (h, w), mode='bilinear', align_corners=False)
         cur_normal = F.interpolate(normal, (h, w), mode='bilinear', align_corners=False)
+        cur_normal /= (torch.norm(cur_normal, p=2, dim=1, keepdim=True) + 1e-6)
 
         #cur_label = F.interpolate(label, (h, w), mode='nearest')
         cur_label = F.interpolate(label, (h, w), mode='bilinear', align_corners=False)
@@ -209,12 +210,12 @@ def get_loss(plane_params, pred_masks, depth, normal, label, K_inv):
         normal_loss += torch.mean((1. - sim) * cur_label.view(b, -1))
         '''
 
-        plane_normal = plane_params / (torch.norm(plane_params, dim=2, keepdim=True) + 1e-6 ) # (b, num, 3)
+        plane_normal = plane_params / (torch.norm(plane_params, p=2, dim=2, keepdim=True) + 1e-6 ) # (b, num, 3)
         normal_diff = 1. - torch.matmul(plane_normal, cur_normal.view(b, 3, -1)) # (b, num, h*w)
         normal_diff = normal_diff * prob[:, :-1, :]
         normal_loss += torch.sum(torch.mean(torch.mean(normal_diff, dim=2), dim=0))
 
-    loss = 0.2*mask_loss + depth_loss + normal_loss
+    loss = 0.1*mask_loss + depth_loss + 0.05*normal_loss
 
     return loss, mask_loss, depth_loss, normal_loss
 
@@ -283,7 +284,15 @@ def train(net, optimizer, data_loader, epoch, writer):
                 writer.add_image('Train Non-plane Mask/%d'%(j), mask[j, -1:], iter + epoch * len(data_loader))
 
                 writer.add_image('Train Normal/%d'%(j), normal[j], iter + epoch * len(data_loader))
-
+                
+                # predict normal map
+                pred_params = plane_params[j]
+                cur_mask = mask[j].detach().cpu().numpy()[:-1, :, :].argmax(axis=0)
+                pred_normal = pred_params[cur_mask, :].detach()  
+                pred_normal = pred_normal.permute(2, 0, 1) 
+                pred_normal /= (torch.norm(pred_normal, p=2, dim=0, keepdim=True) + 1e-6)
+                pred_normal = (pred_normal + 1) / 2.
+                writer.add_image('Train Pred Normal/%d'%(j), pred_normal, iter + epoch * len(data_loader))
 
 def eval(net, data_loader, epoch, writer):
     print('Evaluatin at epoch %d'%(epoch))
