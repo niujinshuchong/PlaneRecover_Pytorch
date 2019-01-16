@@ -166,7 +166,7 @@ def load_dataset(subset):
 
 
 def get_loss(plane_params, pred_masks, depth, normal, label, K_inv):
-    mask_loss, depth_loss, normal_loss = 0., 0., 0.
+    mask_loss, depth_loss, normal_loss, area_loss = 0., 0., 0., 0.
     for scale, pred_mask in zip(range(len(pred_masks)),
                                 pred_masks):
         b, c, h, w = pred_mask.size()
@@ -215,9 +215,14 @@ def get_loss(plane_params, pred_masks, depth, normal, label, K_inv):
         normal_diff = normal_diff * prob[:, :-1, :]
         normal_loss += torch.sum(torch.mean(torch.mean(normal_diff, dim=2), dim=0))
 
-    loss = 0.1*mask_loss + depth_loss + 0.05*normal_loss
+        # area loss
+        plane_area = torch.sum(F.relu(prob[:, :-1, :] - 0.25), dim=2) # (b, num)
+        minimum_area = h*w * 0.01
+        area_loss += torch.mean(F.relu(minimum_area - plane_area))
 
-    return loss, mask_loss, depth_loss, normal_loss
+    loss = 0.1*mask_loss + depth_loss + normal_loss + 0.1*area_loss
+
+    return loss, mask_loss, depth_loss, normal_loss, area_loss
 
 
 def train(net, optimizer, data_loader, epoch, writer):
@@ -226,6 +231,7 @@ def train(net, optimizer, data_loader, epoch, writer):
     losses_mask = AverageMeter()
     losses_depth = AverageMeter()
     losses_normal = AverageMeter()
+    losses_area = AverageMeter()
 
     for iter, sample in enumerate(data_loader):
         image = sample['image'].cuda()
@@ -240,7 +246,7 @@ def train(net, optimizer, data_loader, epoch, writer):
         plane_params, pred_masks = net(image)
 
         # loss
-        loss, loss_mask, loss_depth, loss_normal = get_loss(plane_params, pred_masks, depth, normal, label, K_inv)
+        loss, loss_mask, loss_depth, loss_normal, loss_area = get_loss(plane_params, pred_masks, depth, normal, label, K_inv)
 
         # Backward
         optimizer.zero_grad()
@@ -251,17 +257,20 @@ def train(net, optimizer, data_loader, epoch, writer):
         losses_mask.update(loss_mask.item())
         losses_depth.update(loss_depth.item())
         losses_normal.update(loss_normal.item())
+        losses_area.update(loss_area.item())
 
         if iter % 10 == 0:
             print(f"[{epoch:2d}][{iter:4d}/{len(data_loader)}]"
                   f"Loss:{losses.val:.4f} ({losses.avg:.4f})"
                   f"Mask:{losses_mask.val:.4f} ({losses_mask.avg:.4f})"
                   f"Depth:{losses_depth.val:.4f} ({losses_depth.avg:.4f})"
-                  f"Normal:{losses_normal.val:.4f} ({losses_normal.avg:.4f})")
+                  f"Normal:{losses_normal.val:.4f} ({losses_normal.avg:.4f})"
+                  f"Area:{losses_area.val:.4f} ({losses_area.avg:.4f})")
             writer.add_scalar('loss/total_loss', losses.val, iter + epoch * len(data_loader))
             writer.add_scalar('loss/mask_loss', losses_mask.val, iter + epoch * len(data_loader))
             writer.add_scalar('loss/depth_loss', losses_depth.val, iter + epoch * len(data_loader))
             writer.add_scalar('loss/normal_loss', losses_normal.val, iter + epoch * len(data_loader))
+            writer.add_scalar('loss/area_loss', losses_area.val, iter + epoch * len(data_loader))
 
         if iter % 100 == 0:
             mask = F.softmax(pred_masks[0], dim=1)
