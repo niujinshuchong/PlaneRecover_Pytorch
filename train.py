@@ -357,7 +357,7 @@ def main():
     # tensorboard writer
     writer = SummaryWriter(save_path)
 
-    #eval(net, val_loader, -1, writer)
+    eval(net, val_loader, -1, writer)
 
     for epoch in range(args.epochs):
         train(args, net, optimizer, train_loader, epoch, writer)
@@ -368,7 +368,7 @@ def main():
 
         if (epoch + 1) % 10 == 0:
             args.mask += args.mask_increament
-            args.mask = max(args.mask, 1.0)
+            args.mask = min(args.mask, 1.0)
             print('increate mask weight to ', args.mask)
 
 
