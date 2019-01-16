@@ -216,16 +216,14 @@ def get_loss(plane_params, pred_masks, depth, normal, label, K_inv):
         normal_loss += torch.sum(torch.mean(torch.mean(normal_diff, dim=2), dim=0))
 
         # area loss
-        plane_area = torch.sum(F.relu(prob[:, :-1, :] - 0.25), dim=2) # (b, num)
-        minimum_area = h*w * 0.01
-        area_loss += torch.mean(F.relu(minimum_area - plane_area))
+        # plane_area = torch.sum(F.relu(prob[:, :-1, :] - 0.25), dim=2) # (b, num)
+        # minimum_area = h*w * 0.01
+        # area_loss += torch.mean(F.relu(minimum_area - plane_area))
 
-    loss = 0.1*mask_loss + depth_loss + normal_loss + 0.1*area_loss
-
-    return loss, mask_loss, depth_loss, normal_loss, area_loss
+    return mask_loss, depth_loss, normal_loss
 
 
-def train(net, optimizer, data_loader, epoch, writer):
+def train(args, net, optimizer, data_loader, epoch, writer):
     net.train()
     losses = AverageMeter()
     losses_mask = AverageMeter()
@@ -246,7 +244,8 @@ def train(net, optimizer, data_loader, epoch, writer):
         plane_params, pred_masks = net(image)
 
         # loss
-        loss, loss_mask, loss_depth, loss_normal, loss_area = get_loss(plane_params, pred_masks, depth, normal, label, K_inv)
+        loss_mask, loss_depth, loss_normal = get_loss(plane_params, pred_masks, depth, normal, label, K_inv)
+        loss = args.mask * loss_mask + args.depth * loss_depth + args.normal * loss_normal
 
         # Backward
         optimizer.zero_grad()
@@ -257,20 +256,20 @@ def train(net, optimizer, data_loader, epoch, writer):
         losses_mask.update(loss_mask.item())
         losses_depth.update(loss_depth.item())
         losses_normal.update(loss_normal.item())
-        losses_area.update(loss_area.item())
+        #losses_area.update(loss_area.item())
 
         if iter % 10 == 0:
             print(f"[{epoch:2d}][{iter:4d}/{len(data_loader)}]"
                   f"Loss:{losses.val:.4f} ({losses.avg:.4f})"
                   f"Mask:{losses_mask.val:.4f} ({losses_mask.avg:.4f})"
                   f"Depth:{losses_depth.val:.4f} ({losses_depth.avg:.4f})"
-                  f"Normal:{losses_normal.val:.4f} ({losses_normal.avg:.4f})"
-                  f"Area:{losses_area.val:.4f} ({losses_area.avg:.4f})")
+                  f"Normal:{losses_normal.val:.4f} ({losses_normal.avg:.4f})")
+                  #f"Area:{losses_area.val:.4f} ({losses_area.avg:.4f})")
             writer.add_scalar('loss/total_loss', losses.val, iter + epoch * len(data_loader))
             writer.add_scalar('loss/mask_loss', losses_mask.val, iter + epoch * len(data_loader))
             writer.add_scalar('loss/depth_loss', losses_depth.val, iter + epoch * len(data_loader))
             writer.add_scalar('loss/normal_loss', losses_normal.val, iter + epoch * len(data_loader))
-            writer.add_scalar('loss/area_loss', losses_area.val, iter + epoch * len(data_loader))
+            #writer.add_scalar('loss/area_loss', losses_area.val, iter + epoch * len(data_loader))
 
         if iter % 100 == 0:
             mask = F.softmax(pred_masks[0], dim=1)
@@ -302,6 +301,7 @@ def train(net, optimizer, data_loader, epoch, writer):
                 pred_normal /= (torch.norm(pred_normal, p=2, dim=0, keepdim=True) + 1e-6)
                 pred_normal = (pred_normal + 1) / 2.
                 writer.add_image('Train Pred Normal/%d'%(j), pred_normal, iter + epoch * len(data_loader))
+
 
 def eval(net, data_loader, epoch, writer):
     print('Evaluatin at epoch %d'%(epoch))
@@ -360,11 +360,16 @@ def main():
     #eval(net, val_loader, -1, writer)
 
     for epoch in range(args.epochs):
-        train(net, optimizer, train_loader, epoch, writer)
+        train(args, net, optimizer, train_loader, epoch, writer)
 
         if epoch % 10 == 0:
             eval(net, val_loader, epoch, writer)
             torch.save(net.state_dict(), os.path.join(checkpoint_dir, f"network_epoch_{epoch}.pt"))
+
+        if (epoch + 1) % 10 == 0:
+            args.mask += args.mask_increament
+            args.mask = max(args.mask, 1.0)
+            print('increate mask weight to ', args.mask)
 
 
 def parse_args():
@@ -381,6 +386,19 @@ def parse_args():
                     required=False)
     parser.add_argument('--epochs', default=300, type=int,
                         help='total training epochs',
+                        required=False)
+
+    parser.add_argument('--mask', default=0.1, type=float,
+                        help='mask loss weight',
+                        required=False)
+    parser.add_argument('--depth', default=1.0, type=float,
+                        help='depth loss weight',
+                        required=False)
+    parser.add_argument('--normal', default=1.0, type=float,
+                        help='normal loss weight',
+                        required=False)
+    parser.add_argument('--mask_increament', default=0.05, type=float,
+                        help='mask loss increament every 10 epochs',
                         required=False)
 
     args = parser.parse_args()
